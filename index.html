@@ -1606,6 +1606,47 @@
       animation: pulse 2s infinite;
     }
     
+    /* Data Source Indicators */
+    .data-source-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin: 10px 0;
+    }
+    
+    .data-source-cloud {
+      background: rgba(11, 102, 255, 0.15);
+      color: #0b66ff;
+      border: 1px solid rgba(11, 102, 255, 0.3);
+    }
+    
+    .data-source-local {
+      background: rgba(255, 193, 7, 0.15);
+      color: #856404;
+      border: 1px solid rgba(255, 193, 7, 0.3);
+    }
+    
+    .data-source-error {
+      background: rgba(220, 53, 69, 0.15);
+      color: #dc3545;
+      border: 1px solid rgba(220, 53, 69, 0.3);
+    }
+    
+    .subject-presence-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 6px;
+      border-radius: 12px;
+      font-size: 10px;
+      background: rgba(40, 167, 69, 0.1);
+      color: #28a745;
+    }
+    
     /* MOBILE RESPONSIVE FIXES */
     @media (max-width: 768px) {
       .login-container {
@@ -4069,7 +4110,7 @@
         return dayOfWeek === 0 ? 4 : Math.min(dayOfWeek - 1, 4);
     }
 
-    // ===== ENCRYPTED ATTENDANCE STORAGE (FIXED - NOW USES CONTINUE INSTEAD OF RETURN) =====
+    // ===== FIXED: ENCRYPTED ATTENDANCE STORAGE WITH SUBJECT STORED AT MARKING TIME =====
     async function saveAttendanceForWeek(weekStartStr) {
         if (!unlockedTeacher) return false;
         
@@ -4094,7 +4135,9 @@
                     const record = attendanceData[key];
                     
                     if (record && record.status && record.status !== 'U') {
-                        const subject = getCurrentSubject(unlockedTeacher, date);
+                        // CRITICAL FIX: Use the subject that was stored at marking time, NOT recalculated
+                        // This ensures historical data remains accurate even if schedule changes
+                        const subject = record.subject || getCurrentSubject(unlockedTeacher, date);
                         
                         // Skip SPORTS records - use CONTINUE, NOT RETURN
                         if (subject === 'SPORTS' || subject.includes('SPORTS')) {
@@ -4105,7 +4148,7 @@
                         records.push({
                             class: state.className,
                             teacher: unlockedTeacher,
-                            subject: subject, // This now returns real subject names
+                            subject: subject, // This is now stored permanently at marking time
                             date: date,
                             studentId: student.Admission_No,
                             studentName: student.Student_Name,
@@ -4432,88 +4475,198 @@
         );
     }
 
-    // ===== GLOBAL ADMIN VIEW FUNCTION (NOW USING 13030 WITH REAL-TIME CHARTS) =====
+    // ===== FIXED: GLOBAL ADMIN VIEW FUNCTION (NOW USING 13030 WITH REAL-TIME CHARTS) =====
     document.getElementById('globalAdminViewBtn').addEventListener('click', function() {
         showGlobalAdminPinVerification('openGlobalAdminView', 'access Global Admin Dashboard');
     });
 
+    // ===== FIXED: openGlobalAdminView with proper error handling and data source transparency =====
     async function openGlobalAdminView() {
         if (!currentClass) {
             alert('No class selected');
             return;
         }
 
+        let attendanceData = [];
+        let dataSource = 'Unknown';
+        let loadError = null;
+
         try {
             showSuccess('Loading global admin data from cloud...');
             
-            let attendanceData = [];
-            
+            // Try to load from cloud first - THIS IS THE ONLY SOURCE FOR GLOBAL ADMIN
             if (navigator.onLine) {
                 try {
                     attendanceData = await googleSync.loadFromSheets({
                         class: currentClass
                     });
                     console.log(`Loaded ${attendanceData.length} records from Google Sheets for ${currentClass}`);
+                    
+                    // Validate that each record has a subject
+                    const recordsMissingSubject = attendanceData.filter(r => !r.subject || r.subject === 'Unknown' || r.subject === 'Unknown Subject');
+                    if (recordsMissingSubject.length > 0) {
+                        console.warn(`Warning: ${recordsMissingSubject.length} records are missing subject data`);
+                        
+                        // Try to fix missing subjects from localStorage as fallback
+                        for (let record of recordsMissingSubject) {
+                            // Search in localStorage for the original record with subject
+                            const prefix = EncryptionSystem.encrypt(`iesr_${currentClass}_${record.teacher}_`).substring(0, 30);
+                            
+                            Object.keys(localStorage).forEach(storageKey => {
+                                if (storageKey.startsWith(prefix)) {
+                                    try {
+                                        const encryptedData = localStorage.getItem(storageKey);
+                                        const decrypted = EncryptionSystem.decrypt(encryptedData);
+                                        if (decrypted) {
+                                            const weekData = JSON.parse(decrypted);
+                                            const key = `${record.studentId}|${record.date}`;
+                                            if (weekData[key] && weekData[key].subject) {
+                                                record.subject = weekData[key].subject;
+                                            }
+                                        }
+                                    } catch (e) {}
+                                }
+                            });
+                        }
+                    }
+                    
+                    dataSource = 'cloud';
                 } catch (e) {
-                    console.warn('Could not load from sheets, using IndexedDB:', e);
-                    attendanceData = await indexedDBStorage.getAttendance({
-                        class: currentClass
-                    });
-                    console.log(`Loaded ${attendanceData.length} records from IndexedDB`);
+                    console.warn('Could not load from sheets:', e);
+                    loadError = `Cloud sync error: ${e.message}. Cannot load data - this is a cloud-only view.`;
+                    attendanceData = []; // Don't fallback to local
+                    dataSource = 'error';
                 }
             } else {
-                attendanceData = await indexedDBStorage.getAttendance({
-                    class: currentClass
-                });
-                console.log(`Loaded ${attendanceData.length} records from IndexedDB (offline)`);
-            }
-
-            if (!attendanceData) {
+                loadError = 'You are offline. Global Admin View requires internet connection to access cloud data.';
                 attendanceData = [];
+                dataSource = 'offline';
             }
 
-            const classSubmissions = adminSubmissions[currentClass] || [];
-            
-            if (classSubmissions.length > 0) {
-                classSubmissions.forEach(submission => {
-                    Object.keys(submission.data || {}).forEach(key => {
-                        const parts = key.split('|');
-                        if (parts.length >= 2) {
-                            const subject = getSubjectForTeacherDate(submission.teacher, parts[1]);
-                            
-                            const record = {
-                                class: currentClass,
-                                teacher: submission.teacher,
-                                subject: subject,
-                                date: parts[1],
-                                studentId: parts[0],
-                                studentName: getStudentName(parts[0]),
-                                status: submission.data[key]?.status || 'U',
-                                marked_at: submission.data[key]?.marked_at || submission.submittedAt
-                            };
-                            
-                            const exists = attendanceData.some(r => 
-                                r.studentId === record.studentId && 
-                                r.date === record.date &&
-                                r.teacher === record.teacher
-                            );
-                            
-                            if (!exists && record.status !== 'U') {
-                                attendanceData.push(record);
-                            }
-                        }
-                    });
-                });
+            // FIXED: NO FALLBACK TO LOCAL DATA - GLOBAL ADMIN IS CLOUD-ONLY
+            if (attendanceData.length === 0) {
+                if (loadError) {
+                    showCloudOnlyErrorModal(loadError);
+                } else {
+                    showCloudOnlyErrorModal('No data found in cloud. Please ensure teachers have submitted attendance data.');
+                }
+                return;
             }
 
-            attendanceData = attendanceData.filter(r => r.status && r.status !== 'U');
-            
-            console.log(`Final record count for ${currentClass}: ${attendanceData.length}`);
-            showGlobalAdminDashboard(attendanceData);
+            // Validate data integrity before showing dashboard
+            const validationResult = validateAttendanceData(attendanceData);
+            if (!validationResult.valid) {
+                showDataValidationWarning(validationResult);
+            }
+
+            showGlobalAdminDashboard(attendanceData, dataSource);
+
         } catch (error) {
             console.error('Error loading global admin data:', error);
-            alert('Failed to load global admin data: ' + error.message);
+            showCloudOnlyErrorModal('Failed to load global admin data: ' + error.message);
         }
+    }
+
+    // ===== NEW: Validate attendance data integrity =====
+    function validateAttendanceData(data) {
+        const result = {
+            valid: true,
+            totalRecords: data.length,
+            recordsWithSubject: data.filter(r => r.subject && r.subject !== 'Unknown' && r.subject !== 'Unknown Subject').length,
+            recordsMissingSubject: 0,
+            recordsWithTeacher: data.filter(r => r.teacher).length,
+            recordsMissingTeacher: 0,
+            recordsWithDate: data.filter(r => r.date).length,
+            recordsMissingDate: 0,
+            issues: []
+        };
+
+        result.recordsMissingSubject = result.totalRecords - result.recordsWithSubject;
+        result.recordsMissingTeacher = result.totalRecords - result.recordsWithTeacher;
+        result.recordsMissingDate = result.totalRecords - result.recordsWithDate;
+
+        if (result.recordsMissingSubject > 0) {
+            result.valid = false;
+            result.issues.push(`${result.recordsMissingSubject} records missing subject information`);
+        }
+        if (result.recordsMissingTeacher > 0) {
+            result.valid = false;
+            result.issues.push(`${result.recordsMissingTeacher} records missing teacher information`);
+        }
+        if (result.recordsMissingDate > 0) {
+            result.valid = false;
+            result.issues.push(`${result.recordsMissingDate} records missing date information`);
+        }
+
+        return result;
+    }
+
+    // ===== NEW: Show cloud-only error modal =====
+    function showCloudOnlyErrorModal(message) {
+        const html = `
+            <h3><i class="fas fa-cloud"></i> Global Admin View - Cloud Only</h3>
+            <div style="padding:30px; text-align:center;">
+                <div style="font-size:48px; color:#dc3545; margin-bottom:20px;">
+                    <i class="fas fa-exclamation-triangle"></i>
+                </div>
+                <h4 style="color:#dc3545; margin-bottom:15px;">Cannot Load Cloud Data</h4>
+                <div style="background:#f8f9fa; padding:20px; border-radius:8px; margin:20px 0; text-align:left;">
+                    <p><strong>Error:</strong> ${message}</p>
+                    <hr style="margin:15px 0;">
+                    <p class="small" style="color:#666;">
+                        <i class="fas fa-info-circle"></i> The Global Admin Dashboard is designed to show ONLY live data from the cloud. 
+                        It does not fall back to local data to ensure data integrity and prevent viewing outdated information.
+                    </p>
+                </div>
+                <div style="display:flex; gap:10px; justify-content:center; margin-top:20px;">
+                    <button onclick="retryGlobalAdminLoad()" class="btn-primary">
+                        <i class="fas fa-sync-alt"></i> Retry
+                    </button>
+                    <button onclick="closeModal()" class="muted-btn">
+                        <i class="fas fa-times"></i> Close
+                    </button>
+                </div>
+            </div>
+        `;
+        
+        openModal(html);
+        
+        // Add retry function to window
+        window.retryGlobalAdminLoad = function() {
+            closeModal();
+            openGlobalAdminView();
+        };
+    }
+
+    // ===== NEW: Show data validation warning =====
+    function showDataValidationWarning(validationResult) {
+        const html = `
+            <h3><i class="fas fa-cloud"></i> Data Integrity Warning</h3>
+            <div style="padding:20px; background:#fff3cd; border-left:4px solid #ffc107; margin:15px 0;">
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                    <i class="fas fa-exclamation-triangle" style="color:#856404; font-size:24px;"></i>
+                    <h4 style="color:#856404; margin:0;">Some records have data issues</h4>
+                </div>
+                <ul style="margin:10px 0 0 20px; color:#856404;">
+                    ${validationResult.issues.map(issue => `<li>${issue}</li>`).join('')}
+                </ul>
+            </div>
+            <div style="margin:15px 0; padding:10px; background:#f8f9fa; border-radius:4px;">
+                <p><strong>Total Records:</strong> ${validationResult.totalRecords}</p>
+                <p><strong>Records with Subject:</strong> ${validationResult.recordsWithSubject}</p>
+                <p><strong>Records with Teacher:</strong> ${validationResult.recordsWithTeacher}</p>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:20px;">
+                <button onclick="closeModal()" class="btn-primary">Continue to Dashboard</button>
+            </div>
+        `;
+        
+        openModal(html);
+        
+        // Auto-close after 3 seconds
+        setTimeout(() => {
+            closeModal();
+        }, 3000);
     }
 
     function getStudentName(admissionNo) {
@@ -4521,7 +4674,8 @@
         return student ? student.Student_Name : 'Unknown';
     }
 
-    function showGlobalAdminDashboard(data) {
+    // ===== FIXED: showGlobalAdminDashboard WITH PROPER SUBJECT HANDLING AND DATA SOURCE INDICATOR =====
+    function showGlobalAdminDashboard(data, dataSource = 'cloud') {
         const students = state.students;
         const teachers = CLASS_CONFIG[currentClass].teachers;
         
@@ -4596,9 +4750,10 @@
             });
         }
         
-        // Calculate subject performance - WITH REAL SUBJECT NAMES
+        // Calculate subject performance - WITH REAL SUBJECT NAMES FROM STORED DATA
         const subjectStats = {};
         data.forEach(r => {
+            // CRITICAL FIX: Use stored subject, never recalculate
             const subject = r.subject || 'Unknown';
             if (!subjectStats[subject]) {
                 subjectStats[subject] = {
@@ -4777,9 +4932,15 @@
         // Build the HTML with real-time charts - NOW USING LIVE DATABASE DATA
         let html = `
             <h3><i class="fas fa-globe"></i> Global Admin Dashboard - ${currentClass}</h3>
-            <div style="margin-bottom:15px; color:#666; font-size:12px; display:flex; justify-content:space-between; flex-wrap:wrap;">
-                <span>Showing ${totalRecords} attendance records across ${uniqueDates.length} days</span>
-                <span class="real-time-indicator"><span class="pulse-dot"></span> LIVE DATABASE DATA</span>
+            <div style="margin-bottom:15px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;">
+                <div class="data-source-badge data-source-${dataSource}">
+                    <i class="fas fa-${dataSource === 'cloud' ? 'cloud' : 'database'}"></i>
+                    Data Source: ${dataSource === 'cloud' ? 'LIVE CLOUD DATA' : 'Local Cache'}
+                    ${dataSource === 'cloud' ? '<span class="real-time-indicator"><span class="pulse-dot"></span> LIVE</span>' : ''}
+                </div>
+                <div style="color:#666; font-size:12px;">
+                    Showing ${totalRecords} attendance records across ${uniqueDates.length} days
+                </div>
             </div>
             
             <!-- PIE CHART - TODAY'S SNAPSHOT - LIVE FROM DATABASE -->
@@ -4880,11 +5041,11 @@
         
         html += `</div>`;
         
-        // SUBJECT PERFORMANCE RANKING - WITH REAL SUBJECT NAMES
+        // SUBJECT PERFORMANCE RANKING - WITH REAL SUBJECT NAMES FROM STORED DATA
         html += `<div class="chart-container">
             <div class="chart-title">
                 <i class="fas fa-book"></i> Subject Attendance Performance
-                <span class="real-time-indicator">REAL SUBJECT NAMES</span>
+                <span class="subject-presence-badge"><i class="fas fa-check-circle"></i> Real subject names from cloud</span>
             </div>`;
         
         sortedSubjects.slice(0, 8).forEach(subject => {
@@ -5257,7 +5418,7 @@
             }
             
             showSuccess(`Showing ${filteredData.length} records after filtering`);
-            showGlobalAdminDashboard(filteredData);
+            showGlobalAdminDashboard(filteredData, dataSource);
         });
 
         document.getElementById('resetFilters').addEventListener('click', () => {
@@ -5269,6 +5430,7 @@
         });
 
         document.getElementById('refreshGlobalAdmin').addEventListener('click', () => {
+            closeModal();
             openGlobalAdminView();
         });
 
@@ -5429,7 +5591,7 @@
         hideUnsavedWarning();
     }
 
-    // ===== SINGLE CLICK ATTENDANCE MARKING =====
+    // ===== FIXED: SINGLE CLICK ATTENDANCE MARKING WITH SUBJECT STORAGE =====
     function renderRegister() {
         const container = document.getElementById('registerArea');
         
@@ -5508,7 +5670,7 @@
             
             for (let i = 0; i < 5; i++) {
                 const key = `${s.Admission_No}|${formatDate(dates[i])}`;
-                const rec = (state.attendance[weekStartStr] && state.attendance[weekStartStr][key]) || { status: 'U', note: '' };
+                const rec = (state.attendance[weekStartStr] && state.attendance[weekStartStr][key]) || { status: 'U' };
                 const cls = rec.status === 'P' ? 'present' : (rec.status === 'A' ? 'absent' : '');
                 const symbol = rec.status === 'P' ? '<span style="color:green;font-weight:bold">✓</span>' :
                     (rec.status === 'A' ? '<span style="color:red;font-weight:bold">✗</span>' : 
@@ -5545,6 +5707,7 @@
                 e.stopPropagation();
                 
                 const key = e.currentTarget.dataset.key;
+                const date = e.currentTarget.dataset.date;
                 const weekStartStr = currentWeekStartStr();
                 const currentStatus = (state.attendance[weekStartStr] && state.attendance[weekStartStr][key]?.status) || 'U';
                 
@@ -5553,9 +5716,13 @@
                 else if (currentStatus === 'A') nextStatus = 'L';
                 else if (currentStatus === 'L') nextStatus = 'U';
                 
+                // CRITICAL FIX: Store the subject at marking time
+                const currentSubject = getCurrentSubject(unlockedTeacher, date);
+                
                 state.attendance[weekStartStr][key] = {
                     ...(state.attendance[weekStartStr][key] || {}),
                     status: nextStatus,
+                    subject: currentSubject, // Store subject permanently at marking time
                     marked_by: unlockedTeacher,
                     marked_at: new Date().toISOString()
                 };
@@ -5632,11 +5799,15 @@
         const base = new Date(weekStartStr);
         const targetDateStr = formatDate(addDays(base, dayIndex));
         
+        // CRITICAL FIX: Get the subject once for this day and store it
+        const currentSubject = getCurrentSubject(unlockedTeacher, targetDateStr);
+        
         state.students.forEach(s => {
             const key = `${s.Admission_No}|${targetDateStr}`;
             state.attendance[weekStartStr][key] = {
                 ...(state.attendance[weekStartStr][key] || {}),
                 status: 'P',
+                subject: currentSubject, // Store subject permanently
                 marked_by: unlockedTeacher,
                 marked_at: new Date().toISOString()
             };
@@ -5886,7 +6057,8 @@
                                         date: dateStr,
                                         status: record.status,
                                         marked_by: teacherName,
-                                        timestamp: record.marked_at
+                                        timestamp: record.marked_at,
+                                        subject: record.subject || 'Unknown' // Include subject if available
                                     });
                                 }
                             }
@@ -6055,6 +6227,7 @@
         showAdminPinVerification('openHoaHodViewAfterAuth', 'access Department View');
     }
     
+    // ===== FIXED: openHoaHodViewAfterAuth with proper subject handling =====
     function openHoaHodViewAfterAuth() {
         const hoaData = calculateHoaHodDataFromSubmissions();
         
@@ -6229,7 +6402,7 @@
         
         html += `</tbody></table>
             <div style="text-align:center;margin-top:10px;font-size:11px;color:#666">
-                Based on submitted attendance data
+                Based on submitted attendance data with subject tracking
             </div>
         </div></div>`;
         
@@ -6350,10 +6523,11 @@
                             
                             const date = parts[1];
                             const teacherName = record.marked_by || submission.teacher;
-                            const subject = getSubjectForTeacherDate(teacherName, date);
+                            // CRITICAL FIX: Use stored subject from the record
+                            const subject = record.subject || 'Unknown Subject';
                             
                             // Skip counting SPORTS as missed classes
-                            if (subject !== 'SPORTS' && !subject.includes('SPORTS')) {
+                            if (subject !== 'SPORTS' && !subject.includes('SPORTS') && subject !== 'Unknown Subject') {
                                 if (!studentMissedRecords[admissionNo][subject]) {
                                     studentMissedRecords[admissionNo][subject] = {
                                         count: 0,
@@ -6375,22 +6549,35 @@
                 }
             });
             
-            const teacherSessions = state.sessions.filter(s => 
-                (s.LECTURER === teacher || s.LECTURER === 'ALL LECTURERS') &&
-                s.SUBJECT !== 'SPORTS' && !s.SUBJECT.includes('SPORTS')
-            );
-            
-            teacherSessions.forEach(session => {
-                const subjectKey = `${session.SUBJECT}|${teacher}`;
-                if (!subjectAttendance[subjectKey]) {
-                    subjectAttendance[subjectKey] = {
-                        name: session.SUBJECT,
-                        teacher: teacher,
-                        present: 0,
-                        absent: 0,
-                        total: 0,
-                        percentage: 0
-                    };
+            // Also collect subject attendance from all submissions
+            Object.keys(submission.data || {}).forEach(key => {
+                const parts = key.split('|');
+                if (parts.length >= 2) {
+                    const record = submission.data[key];
+                    if (record.status && record.status !== 'U') {
+                        // CRITICAL FIX: Use stored subject
+                        const subject = record.subject || 'Unknown Subject';
+                        const teacher = record.marked_by || submission.teacher;
+                        const subjectKey = `${subject}|${teacher}`;
+                        
+                        if (!subjectAttendance[subjectKey]) {
+                            subjectAttendance[subjectKey] = {
+                                name: subject,
+                                teacher: teacher,
+                                present: 0,
+                                absent: 0,
+                                total: 0,
+                                percentage: 0
+                            };
+                        }
+                        
+                        subjectAttendance[subjectKey].total++;
+                        if (record.status === 'P' || record.status === 'L') {
+                            subjectAttendance[subjectKey].present++;
+                        } else if (record.status === 'A') {
+                            subjectAttendance[subjectKey].absent++;
+                        }
+                    }
                 }
             });
         });
@@ -6433,24 +6620,6 @@
         hoaData.teacherSubmissions = Object.values(teacherStats);
         
         Object.values(subjectAttendance).forEach(subject => {
-            classSubmissions.forEach(submission => {
-                const teacher = submission.teacher;
-                Object.keys(submission.data || {}).forEach(key => {
-                    const parts = key.split('|');
-                    if (parts.length >= 2) {
-                        const record = submission.data[key];
-                        if (record.marked_by === teacher && record.status && record.status !== 'U') {
-                            subject.total++;
-                            if (record.status === 'P' || record.status === 'L') {
-                                subject.present++;
-                            } else if (record.status === 'A') {
-                                subject.absent++;
-                            }
-                        }
-                    }
-                });
-            });
-            
             if (subject.total > 0) {
                 subject.percentage = Math.round((subject.present / subject.total) * 100);
                 hoaData.subjectAttendance.push(subject);
@@ -6814,6 +6983,22 @@
             const weekEnd = new Date(weekStart);
             weekEnd.setDate(weekEnd.getDate() + 4);
             
+            // Count records with subjects
+            let recordsWithSubject = 0;
+            let totalRecords = 0;
+            Object.keys(submission.data || {}).forEach(key => {
+                const parts = key.split('|');
+                if (parts.length >= 2) {
+                    const record = submission.data[key];
+                    if (record.status && record.status !== 'U') {
+                        totalRecords++;
+                        if (record.subject) {
+                            recordsWithSubject++;
+                        }
+                    }
+                }
+            });
+            
             html += `<div class="submission-card">
                 <div class="submission-header">
                     <div class="submission-teacher">${submission.teacher}</div>
@@ -6828,6 +7013,10 @@
                     ${submission.summary.absent} absent | 
                     ${submission.summary.late} late | 
                     ${submission.summary.unmarked} unmarked</div>
+                    <div class="subject-presence-badge" style="margin-top:4px;">
+                        <i class="fas fa-${recordsWithSubject === totalRecords ? 'check-circle' : 'exclamation-triangle'}" style="color:${recordsWithSubject === totalRecords ? '#28a745' : '#ffc107'}"></i>
+                        Subject Tracking: ${recordsWithSubject}/${totalRecords} records have subjects
+                    </div>
                 </div>
                 <div style="margin-top:8px; display:flex; gap:4px; flex-wrap:wrap;">
                     <button onclick="viewSubmissionDetails('${submission.id}')" class="muted-btn" style="padding:4px 8px;font-size:11px">
@@ -6924,7 +7113,11 @@
                 
                 const key = `${student.Admission_No}|${date}`;
                 const record = submission.data[key];
-                studentAttendance[student.Admission_No].attendance[date] = record?.status || 'U';
+                // CRITICAL FIX: Store subject with the attendance record for display
+                studentAttendance[student.Admission_No].attendance[date] = {
+                    status: record?.status || 'U',
+                    subject: record?.subject || 'Unknown'
+                };
             });
         });
         
@@ -6934,22 +7127,30 @@
                 <td style="padding:6px;border-bottom:1px solid #eee">${student.admission}</td>`;
             
             submission.summary.dates.forEach(date => {
-                const status = student.attendance[date];
+                const att = student.attendance[date];
+                const status = att.status;
+                const subject = att.subject;
                 let symbol = '—';
                 let color = '#6c757d';
+                let title = '';
                 
                 if (status === 'P') {
                     symbol = '✓';
                     color = 'green';
+                    title = `Present - ${subject}`;
                 } else if (status === 'A') {
                     symbol = '✗';
                     color = 'red';
+                    title = `Absent - ${subject}`;
                 } else if (status === 'L') {
                     symbol = 'L';
                     color = '#7a1b4a';
+                    title = `Late - ${subject}`;
+                } else {
+                    title = 'Unmarked';
                 }
                 
-                html += `<td style="padding:6px;border-bottom:1px solid #eee;text-align:center;color:${color};font-weight:bold">${symbol}</td>`;
+                html += `<td style="padding:6px;border-bottom:1px solid #eee;text-align:center;color:${color};font-weight:bold" title="${title}">${symbol}</td>`;
             });
             
             html += `</tr>`;
@@ -7000,7 +7201,7 @@
         showSuccess('All submissions exported as CSV!');
     }
 
-    // ===== EXPORT FUNCTIONS =====
+    // ===== FIXED: EXPORT FUNCTIONS WITH PROPER SUBJECT HANDLING =====
     async function exportCSV() {
         if (!unlockedTeacher) {
             alert('You must unlock a teacher register first.');
@@ -7540,6 +7741,7 @@
         submitToAdmin();
     });
     
+    // ===== FIXED: submitToAdmin with subject preservation =====
     function submitToAdmin() {
         const teacher = unlockedTeacher;
         const classCode = currentClass;
@@ -7553,11 +7755,22 @@
             const weekStart = new Date(weekStartStr);
             const dates = [0, 1, 2, 3, 4].map(i => formatDate(addDays(weekStart, i)));
             
+            // Track subjects in submission
+            let recordsWithSubject = 0;
+            let totalRecords = 0;
+            
             state.students.forEach(s => {
                 dates.forEach(d => {
                     const key = `${s.Admission_No}|${d}`;
                     const st = (weekData[key]?.status) || 'U';
                     totals[st] = (totals[st] || 0) + 1;
+                    
+                    if (weekData[key] && weekData[key].status && weekData[key].status !== 'U') {
+                        totalRecords++;
+                        if (weekData[key].subject) {
+                            recordsWithSubject++;
+                        }
+                    }
                 });
             });
             
@@ -7568,7 +7781,7 @@
                 weekStart: weekStartStr,
                 adminId: '9209', // Fixed admin ID
                 submittedAt: new Date().toISOString(),
-                data: weekData,
+                data: weekData, // This includes all subjects stored at marking time
                 summary: {
                     students: state.students.length,
                     present: totals.P,
@@ -7576,7 +7789,9 @@
                     late: totals.L,
                     unmarked: totals.U,
                     dates: dates,
-                    markedLessons: totals.P + totals.A + totals.L
+                    markedLessons: totals.P + totals.A + totals.L,
+                    recordsWithSubject: recordsWithSubject,
+                    totalRecords: totalRecords
                 }
             };
             
@@ -7596,7 +7811,11 @@
             localStorage.setItem('iesr_admin_submissions', JSON.stringify(submissions));
             adminSubmissions = submissions;
             
-            showSuccess(`Attendance data submitted to Admin successfully! (ID: 9209)`);
+            const subjectStatus = recordsWithSubject === totalRecords ? '✅ All records have subjects' : 
+                                recordsWithSubject > 0 ? `⚠️ ${recordsWithSubject}/${totalRecords} records have subjects` : 
+                                '❌ No subjects found in records';
+            
+            showSuccess(`Attendance data submitted to Admin successfully! ${subjectStatus}`);
             
         } catch (error) {
             console.error('Submission failed:', error);
