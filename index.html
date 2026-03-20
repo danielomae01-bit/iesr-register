@@ -1989,46 +1989,68 @@
   }
 }
 </style>  
-<!-- AUTO-UPDATE SCRIPT - IESR AUTO UPDATER WITH CACHE BUSTING -->
+<!-- AUTO-UPDATE SCRIPT - IESR AUTO UPDATER WITH FORCED CACHE BUSTING -->
 <script>
 // CHECK FOR UPDATES ON EVERY START - CONFIGURED FOR MIKEKENA8-HUB
 const GITHUB_VERSION_URL = 'https://raw.githubusercontent.com/mikekena8-hub/iesr-register/main/version.json';
-const GITHUB_HTML_URL = 'https://raw.githubusercontent.com/mikekena8-hub/iesr-register/main/index.html?v=' + Date.now();
+const GITHUB_HTML_URL = 'https://raw.githubusercontent.com/mikekena8-hub/iesr-register/main/index.html';
 
 async function checkForUpdates() {
     try {
-        // Check GitHub for new version (add timestamp to bypass cache)
-        const response = await fetch(GITHUB_VERSION_URL + '?t=' + Date.now());
+        console.log('Checking for updates...');
+        
+        // Add timestamp to bypass any cache
+        const versionUrl = GITHUB_VERSION_URL + '?t=' + Date.now();
+        const response = await fetch(versionUrl);
         const serverData = await response.json();
         
         // Get current version from phone storage
         let currentVersion = localStorage.getItem('appVersion') || '1.0.0';
         
-        // Compare versions (if server version is higher)
+        console.log(`Current: ${currentVersion}, Server: ${serverData.version}`);
+        
+        // Compare versions
         if (serverData.version > currentVersion) {
-            // Ask user if they want to update
-            if (confirm(`📱 New update v${serverData.version} available!\n\nCurrent version: v${currentVersion}\n\nUpdate now?`)) {
-                // Download new HTML with cache-busting parameter
-                const htmlResponse = await fetch(GITHUB_HTML_URL);
+            if (confirm(`📱 New update v${serverData.version} available!\n\nCurrent: v${currentVersion}\n\nUpdate now?`)) {
+                console.log('Downloading update...');
+                
+                // Download with multiple cache busters
+                const htmlUrl = GITHUB_HTML_URL + '?v=' + serverData.version + '&t=' + Date.now();
+                const htmlResponse = await fetch(htmlUrl);
                 const newHTML = await htmlResponse.text();
                 
-                // Save to phone storage
+                // Save to storage
                 localStorage.setItem('cachedHTML', newHTML);
                 localStorage.setItem('appVersion', serverData.version);
                 
-                alert('✅ Update downloaded! The app will now reload with the latest version.');
-                // Force reload from server, bypassing cache
-                window.location.reload(true);
+                alert('✅ Update downloaded!');
+                
+                // CRITICAL: Clear ALL caches
+                if (window.caches) {
+                    try {
+                        const keys = await caches.keys();
+                        await Promise.all(keys.map(key => caches.delete(key)));
+                        console.log('Service worker caches cleared');
+                    } catch (e) {
+                        console.log('Cache clear failed:', e);
+                    }
+                }
+                
+                // Force reload with cache bypass
+                setTimeout(() => {
+                    // This forces a completely fresh load
+                    window.location.href = window.location.href.split('?')[0] + '?fresh=' + Date.now();
+                }, 100);
             }
+        } else {
+            console.log('Already on latest version');
         }
     } catch (e) {
-        // If offline or error, silently use cached version
-        console.log('Offline mode or update check failed');
+        console.log('Update check failed:', e);
         
-        // If offline, load cached version
+        // If offline, use cached version
         const cached = localStorage.getItem('cachedHTML');
         if (cached && !navigator.onLine) {
-            // Replace current page with cached version
             document.open();
             document.write(cached);
             document.close();
@@ -2038,27 +2060,39 @@ async function checkForUpdates() {
 
 // Run when app starts
 window.addEventListener('load', function() {
+    console.log('App loaded, checking for updates...');
+    
+    // Check URL parameter to detect fresh load
+    const urlParams = new URLSearchParams(window.location.search);
+    const isFreshLoad = urlParams.has('fresh');
+    
+    if (isFreshLoad) {
+        console.log('Fresh load detected - removing URL parameter');
+        // Remove the parameter for clean URL
+        history.replaceState({}, document.title, window.location.pathname);
+    }
+    
     // Check if we have cached version for offline use
     const cached = localStorage.getItem('cachedHTML');
     if (!navigator.onLine && cached) {
-        // We're offline and have cached version - use it
+        console.log('Offline mode - using cached version');
         document.open();
         document.write(cached);
         document.close();
-        return; // Stop here, cached version will run its own load event
+        return;
     }
     
-    // Check for updates (will only run if online)
+    // Check for updates
     checkForUpdates();
 });
 
-// Also check when internet comes back online
+// Also check when internet comes back
 window.addEventListener('online', function() {
     console.log('Back online, checking for updates...');
     checkForUpdates();
 });
 
-// For first-time users, set initial version
+// Set initial version
 if (!localStorage.getItem('appVersion')) {
     localStorage.setItem('appVersion', '1.0.0');
 }
